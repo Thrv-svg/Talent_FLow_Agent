@@ -1,0 +1,6 @@
+{
+  "name": "TalentFlow",
+  "description": "Platform rekrutmen talenta berbasis rating (seperti FIFA) dilengkapi kuis akademis, psikotes lengkap (Kraepelin, DISC, PAPI Kostik), fitur Magang, dan interprestasi AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
