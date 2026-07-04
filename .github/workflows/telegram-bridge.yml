@@ -1,0 +1,80 @@
+name: Telegram Bridge
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync Telegram inbox/outbox
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: "1802052551"
+        run: |
+          set -e
+          mkdir -p .agent
+          STATE_FILE=".agent/telegram_state.json"
+          INBOX_FILE=".agent/inbox.json"
+          OUTBOX_FILE=".agent/outbox.json"
+
+          [ -f "$STATE_FILE" ] || echo '{"last_update_id": 0}' > "$STATE_FILE"
+          [ -f "$INBOX_FILE" ] || echo '[]' > "$INBOX_FILE"
+          [ -f "$OUTBOX_FILE" ] || echo '[]' > "$OUTBOX_FILE"
+
+          LAST_UPDATE_ID=$(jq -r '.last_update_id' "$STATE_FILE")
+          OFFSET=$((LAST_UPDATE_ID + 1))
+
+          # 1) Pull new Telegram messages, filter to the owner's chat only
+          RESP=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=${OFFSET}")
+
+          echo "$RESP" | jq --arg chat_id "$CHAT_ID" '
+            [.result[]? | select(.message.chat.id == ($chat_id | tonumber)) | {
+              update_id: .update_id,
+              text: .message.text,
+              date: .message.date
+            }]
+          ' > /tmp/new_messages.json
+
+          NEW_COUNT=$(jq 'length' /tmp/new_messages.json)
+          if [ "$NEW_COUNT" -gt 0 ]; then
+            jq -s '.[0] + .[1]' "$INBOX_FILE" /tmp/new_messages.json > /tmp/inbox_merged.json
+            mv /tmp/inbox_merged.json "$INBOX_FILE"
+            echo "Appended $NEW_COUNT new message(s) to inbox"
+          fi
+
+          # Advance last_update_id past everything seen, even from other senders
+          MAX_UPDATE_ID=$(echo "$RESP" | jq '[.result[]?.update_id] | if length > 0 then max else 0 end')
+          if [ "$MAX_UPDATE_ID" -gt "$LAST_UPDATE_ID" ]; then
+            jq --argjson id "$MAX_UPDATE_ID" '.last_update_id = $id' "$STATE_FILE" > /tmp/state.json
+            mv /tmp/state.json "$STATE_FILE"
+          fi
+
+          # 2) Flush any pending outbox replies to Telegram
+          OUTBOX_COUNT=$(jq 'length' "$OUTBOX_FILE")
+          if [ "$OUTBOX_COUNT" -gt 0 ]; then
+            jq -c '.[]' "$OUTBOX_FILE" | while read -r msg; do
+              TEXT=$(echo "$msg" | jq -r '.text')
+              curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+                -H "Content-Type: application/json" \
+                -d "$(jq -n --arg chat_id "$CHAT_ID" --arg text "$TEXT" '{chat_id: ($chat_id|tonumber), text: $text}')" \
+                > /dev/null
+            done
+            echo '[]' > "$OUTBOX_FILE"
+            echo "Sent $OUTBOX_COUNT queued reply/replies"
+          fi
+
+      - name: Commit state if changed
+        run: |
+          git config user.name "telegram-bridge-bot"
+          git config user.email "actions@github.com"
+          git add .agent/telegram_state.json .agent/inbox.json .agent/outbox.json
+          git diff --staged --quiet || git commit -m "Telegram bridge sync [skip ci]"
+          git push
