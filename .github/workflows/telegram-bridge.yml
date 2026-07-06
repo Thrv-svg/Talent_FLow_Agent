@@ -62,22 +62,6 @@ jobs:
           git diff --staged --quiet || git commit -m "Telegram bridge: sync inbox [skip ci]"
           git push
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install anthropic SDK
-        run: pip install anthropic
-
-      - name: Run the coding agent
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python .github/scripts/agent.py
-
-      - name: Pull latest before flushing outbox
-        run: git pull --rebase
-
       - name: Flush queued replies to Telegram
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
