@@ -499,7 +499,7 @@ export default function App() {
     }
   };
 
-  // FETCH AI EVALUATION VIA /api/gemini/interpret
+  // FETCH RULE-BASED EVALUATION VIA /api/user/generate-report
   const requestAIInterpretation = async () => {
     setIsInterpreting(true);
     setLoadingStep('Melakukan pre-processing data profil talenta...');
@@ -518,7 +518,7 @@ export default function App() {
         psychologicalScores: psychResults
       };
 
-      const res = await apiClient.post('/api/gemini/interpret', payload);
+      const res = await apiClient.post('/api/user/generate-report', payload);
       const data = res.data;
       if (data.success && data.data) {
         setAiReport(data.data);

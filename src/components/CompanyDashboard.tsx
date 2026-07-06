@@ -158,7 +158,7 @@ export default function CompanyDashboard({ user, onLogout, onBackToApp }: Compan
         }
       };
 
-      const { data } = await apiClient.post('/api/ai/match', payload);
+      const { data } = await apiClient.post('/api/company/candidate-fit', payload);
       
       if (data.success && data.matchText) {
         setAiAnalysis(prev => ({ ...prev, [c.id]: data.matchText }));

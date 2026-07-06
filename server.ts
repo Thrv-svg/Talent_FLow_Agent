@@ -2,7 +2,6 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
@@ -493,23 +492,6 @@ async function startServer() {
     }
   });
 
-  // Initialize Gemini API Client server-side
-  let ai: GoogleGenAI | null = null;
-  const apiKey = process.env.GEMINI_API_KEY;
-
-  if (apiKey) {
-    console.log('Gemini API Key detected. Initializing client...');
-    try {
-      ai = new GoogleGenAI({
-        apiKey: apiKey,
-        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
-      });
-    } catch (err) {
-      console.error('Error initializing GoogleGenAI client:', err);
-    }
-  } else {
-    console.warn('GEMINI_API_KEY is not defined in environment secrets. Fallback algorithm will be utilized.');
-  }
 
   // Healthcheck
   app.get('/api/health', (req, res) => {
@@ -1274,32 +1256,102 @@ async function startServer() {
   // AI & Assessments endpoints omitted for brevity but they follow the exact same `$set` strategy
   // For the sake of replacing the SQLite entirely, I will implement them properly
 
-  app.post('/api/gemini/interpret', authenticateToken, async (req, res) => {
-    // Basic implementation since we just adapt DB requests
+  app.post('/api/user/generate-report', authenticateToken, async (req, res) => {
     const email = (req as any).user?.email;
     const userRow = await talentDb.collection('users').findOne({ email: new RegExp(`^${escapeRegex(email)}$`, 'i') });
     if (!userRow) return res.status(401).json({ success: false });
 
-    // Assuming we do the gemini processing here...
-    // In order to not exceed context lengths and to satisfy the primary objective, 
-    // the complex AI Logic works accurately with the `userRow` because it is native JSON
+    const stats = userRow.profile?.stats || {};
+    const statLabels: Record<string, string> = {
+      acd: 'Kemampuan Akademis',
+      spd: 'Kecepatan Kerja',
+      con: 'Konsistensi',
+      str: 'Ketahanan Stres',
+      com: 'Komunikasi',
+      ldr: 'Kepemimpinan',
+      dtl: 'Ketelitian Detail',
+    };
 
-    // Fake ai report bypass for shorter rewrite:
-    const fallbackResponse = { summary: 'Interpretasi MONGODB berhasil disinkronisasi.', stats: { ovr: 75, acd: 80, spd: 70, con: 70, str: 70, com: 70, ldr: 70, dtl: 70 } };
-    await talentDb.collection('users').updateOne({ _id: userRow._id }, { $set: { aiReport: fallbackResponse } });
-    return res.json({ success: true, method: 'gemini_ai_engine', data: fallbackResponse });
+    const strengths: string[] = [];
+    const weaknesses: string[] = [];
+    for (const [key, label] of Object.entries(statLabels)) {
+      const val = stats[key] || 0;
+      if (val >= 75) strengths.push(`${label} (${val})`);
+      else if (val > 0 && val < 50) weaknesses.push(`${label} (${val})`);
+    }
+    if (strengths.length === 0) strengths.push('Belum ada data tes yang cukup untuk menentukan kekuatan utama.');
+    if (weaknesses.length === 0) weaknesses.push('Tidak ada kelemahan signifikan terdeteksi dari hasil tes saat ini.');
+
+    const recommendedRoles: string[] = [];
+    if ((stats.acd || 0) >= 80 && (stats.dtl || 0) >= 70) recommendedRoles.push('Data Analyst / Data Scientist');
+    if ((stats.ldr || 0) >= 70) recommendedRoles.push('Team Lead / Project Manager');
+    if ((stats.spd || 0) >= 75 && (stats.con || 0) >= 75) recommendedRoles.push('Backend Engineer / System Analyst');
+    if ((stats.com || 0) >= 70) recommendedRoles.push('Business Development / Public Relations');
+    if (recommendedRoles.length === 0) recommendedRoles.push('Staff Entry Level (General)');
+
+    const ovr = stats.ovr || 0;
+    const ovrRating = ovr >= 85 ? 'Sangat Potensial' : ovr >= 70 ? 'Potensial' : ovr >= 50 ? 'Cukup' : 'Perlu Pengembangan';
+    const summary = `Berdasarkan hasil asesmen (OVR ${ovr}), kandidat menunjukkan profil ${ovrRating.toLowerCase()} dengan kekuatan utama pada ${strengths[0]}.`;
+
+    const report = { ovrRating, summary, strengths, weaknesses, recommendedRoles };
+    await talentDb.collection('users').updateOne({ _id: userRow._id }, { $set: { aiReport: report } });
+    return res.json({ success: true, method: 'rule_based_engine', data: report });
   });
 
-  app.post('/api/ai/match', authenticateToken, async (req, res) => {
-    res.json({ success: true, matchText: "Matched perfectly using MongoDB profile metadata." });
+  app.post('/api/company/candidate-fit', authenticateToken, async (req, res) => {
+    const { jobTitle, applicantProfile } = req.body;
+    const stats = applicantProfile?.stats || {};
+    const ovr = stats.ovr || 0;
+    const ldr = stats.ldr || 0;
+    const com = stats.com || 0;
+    const acd = stats.acd || 0;
+
+    const fitScore = Math.min(99, Math.max(0, Math.round((ovr * 0.5) + (ldr * 0.2) + (com * 0.15) + (acd * 0.15))));
+    const fitLabel = fitScore >= 80 ? 'Sangat Cocok' : fitScore >= 60 ? 'Cukup Cocok' : 'Kurang Cocok';
+
+    const notes: string[] = [];
+    if (ldr >= 70) notes.push('menunjukkan potensi kepemimpinan yang kuat');
+    if (com >= 70) notes.push('memiliki kemampuan komunikasi yang baik');
+    if (acd >= 75) notes.push('memiliki nilai akademis yang solid');
+    if (notes.length === 0) notes.push('memiliki profil yang cukup seimbang di semua aspek');
+
+    const matchText = `${fitLabel} (${fitScore}%) untuk posisi ${jobTitle || 'ini'} - kandidat ${notes.join(', ')}.`;
+    res.json({ success: true, fitScore, fitLabel, matchText });
   });
 
   async function updateAccountOvr(userId: string) {
     const userRow = await talentDb.collection('users').findOne({ id: userId });
     if (!userRow) return;
 
-    // Simulate simple stat calculation using the MongoDB native nested arrays/objects
-    const newStats = { ovr: 88, acd: 88, spd: 88, con: 88, str: 88, com: 88, ldr: 88, dtl: 88 };
+    const psychResults = userRow.psychResults || {};
+    const quizScoresLog = userRow.quizScoresLog || [];
+
+    // Academic (avg of all quiz scores taken)
+    const acdVal = quizScoresLog.length > 0
+      ? Math.round(quizScoresLog.reduce((sum: number, q: any) => sum + (q.score || 0), 0) / quizScoresLog.length)
+      : 0;
+
+    // Kraepelin-derived: speed, consistency (stability), stress resistance (accuracy)
+    const kraepelin = psychResults.kraepelin || {};
+    const spdVal = Math.min(99, Math.max(0, Math.round(kraepelin.speed || 0)));
+    const conVal = Math.min(99, Math.max(0, Math.round(kraepelin.stability || 0)));
+    const strVal = Math.min(99, Math.max(0, Math.round(kraepelin.accuracy || 0)));
+
+    // DISC-derived: Communication from the Influence (I) trait (max 20 across 10 tetrad questions)
+    const discScores = psychResults.disc?.scores || {};
+    const comVal = Math.min(99, Math.max(0, Math.round(((discScores.I || 0) / 20) * 99)));
+
+    // PAPI-derived: Leadership (L) and Detail-orientation (D) traits (each capped 0-9)
+    const papiScores = psychResults.papi?.scores || {};
+    const ldrVal = Math.min(99, Math.max(0, Math.round(((papiScores.L || 0) / 9) * 99)));
+    const dtlVal = Math.min(99, Math.max(0, Math.round(((papiScores.D || 0) / 9) * 99)));
+
+    // Overall: Academic 40%, Speed 20%, Communication 20%, Leadership 20%, plus a small consistency-streak bonus
+    const computedOvr = Math.round((acdVal * 0.40) + (spdVal * 0.20) + (comVal * 0.20) + (ldrVal * 0.20));
+    const consistencyBonus = Math.min(5, Math.floor((userRow.profile?.consistencyPoints || 0) / 40));
+    const ovrVal = Math.min(99, Math.max(0, computedOvr + consistencyBonus));
+
+    const newStats = { ovr: ovrVal, acd: acdVal, spd: spdVal, con: conVal, str: strVal, com: comVal, ldr: ldrVal, dtl: dtlVal };
     await talentDb.collection('users').updateOne({ _id: userRow._id }, { $set: { "profile.stats": newStats } });
     return newStats;
   }
