@@ -14,7 +14,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Sync Telegram inbox/outbox
+      - name: Set up git identity
+        run: |
+          git config user.name "telegram-bridge-bot"
+          git config user.email "actions@github.com"
+
+      - name: Pull new Telegram messages into inbox
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: "1802052551"
@@ -23,16 +28,13 @@ jobs:
           mkdir -p .agent
           STATE_FILE=".agent/telegram_state.json"
           INBOX_FILE=".agent/inbox.json"
-          OUTBOX_FILE=".agent/outbox.json"
 
           [ -f "$STATE_FILE" ] || echo '{"last_update_id": 0}' > "$STATE_FILE"
           [ -f "$INBOX_FILE" ] || echo '[]' > "$INBOX_FILE"
-          [ -f "$OUTBOX_FILE" ] || echo '[]' > "$OUTBOX_FILE"
 
           LAST_UPDATE_ID=$(jq -r '.last_update_id' "$STATE_FILE")
           OFFSET=$((LAST_UPDATE_ID + 1))
 
-          # 1) Pull new Telegram messages, filter to the owner's chat only
           RESP=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=${OFFSET}")
 
           echo "$RESP" | jq --arg chat_id "$CHAT_ID" '
@@ -50,14 +52,41 @@ jobs:
             echo "Appended $NEW_COUNT new message(s) to inbox"
           fi
 
-          # Advance last_update_id past everything seen, even from other senders
           MAX_UPDATE_ID=$(echo "$RESP" | jq '[.result[]?.update_id] | if length > 0 then max else 0 end')
           if [ "$MAX_UPDATE_ID" -gt "$LAST_UPDATE_ID" ]; then
             jq --argjson id "$MAX_UPDATE_ID" '.last_update_id = $id' "$STATE_FILE" > /tmp/state.json
             mv /tmp/state.json "$STATE_FILE"
           fi
 
-          # 2) Flush any pending outbox replies to Telegram
+          git add .agent/telegram_state.json .agent/inbox.json
+          git diff --staged --quiet || git commit -m "Telegram bridge: sync inbox [skip ci]"
+          git push
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install anthropic SDK
+        run: pip install anthropic
+
+      - name: Run the coding agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python .github/scripts/agent.py
+
+      - name: Pull latest before flushing outbox
+        run: git pull --rebase
+
+      - name: Flush queued replies to Telegram
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: "1802052551"
+        run: |
+          set -e
+          OUTBOX_FILE=".agent/outbox.json"
+          [ -f "$OUTBOX_FILE" ] || exit 0
+
           OUTBOX_COUNT=$(jq 'length' "$OUTBOX_FILE")
           if [ "$OUTBOX_COUNT" -gt 0 ]; then
             jq -c '.[]' "$OUTBOX_FILE" | while read -r msg; do
@@ -69,12 +98,7 @@ jobs:
             done
             echo '[]' > "$OUTBOX_FILE"
             echo "Sent $OUTBOX_COUNT queued reply/replies"
+            git add .agent/outbox.json
+            git commit -m "Telegram bridge: flush outbox [skip ci]"
+            git push
           fi
-
-      - name: Commit state if changed
-        run: |
-          git config user.name "telegram-bridge-bot"
-          git config user.email "actions@github.com"
-          git add .agent/telegram_state.json .agent/inbox.json .agent/outbox.json
-          git diff --staged --quiet || git commit -m "Telegram bridge sync [skip ci]"
-          git push
